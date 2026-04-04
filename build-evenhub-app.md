@@ -491,9 +491,11 @@ bridge.onDeviceStatusChanged((status) => {
   // status.connectType, status.battery, status.wearStatus, status.isCharging
 })
 
-// Persistent storage (survives app restarts, stored on phone)
+// Persistent storage — SDK localStorage (survives app restarts, stored on phone)
+// Use this for ALL user state: position, bookmarks, settings, preferences
 await bridge.setLocalStorage('key', 'value')
 const val = await bridge.getLocalStorage('key')
+// Returns empty string if key doesn't exist
 
 // Audio
 await bridge.audioControl(true)   // start mic, PCM in audioEvent
@@ -736,6 +738,122 @@ async function updateDisplay(content: string) {
 - Cache API responses where appropriate.
 - Never block the render loop waiting for network.
 - Handle network errors gracefully — show "No connection" on glasses, don't crash.
+
+---
+
+# PERSISTENCE (localStorage + IndexedDB)
+
+Every app that tracks user state MUST persist it. Users expect to resume where they left off.
+
+## SDK localStorage — Primary persistence layer
+
+```typescript
+// ALWAYS namespace keys to avoid collision with other plugins
+const PREFIX = 'myapp.'
+
+// Save structured data
+async function saveState(bridge: EvenAppBridge, key: string, data: any): Promise<void> {
+  await bridge.setLocalStorage(PREFIX + key, JSON.stringify(data))
+}
+
+// Load structured data
+async function loadState<T>(bridge: EvenAppBridge, key: string, fallback: T): Promise<T> {
+  try {
+    const raw = await bridge.getLocalStorage(PREFIX + key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+```
+
+### What to persist (and when)
+
+| Data | When to save | Example key |
+|------|-------------|-------------|
+| User position / progress | On every meaningful state change (page turn, level complete, etc.) | `myapp.position` |
+| User preferences / settings | On setting change | `myapp.settings` |
+| Bookmarks / favorites | On add/remove | `myapp.bookmarks` |
+| Last-used item | On item selection | `myapp.lastItem` |
+| High scores / stats | On update | `myapp.stats` |
+
+### Restore on startup
+
+```typescript
+async function init() {
+  const bridge = await initBridge()
+
+  // ALWAYS restore state before first render
+  const savedPosition = await loadState(bridge, 'position', 0)
+  const savedSettings = await loadState(bridge, 'settings', { density: 'normal' })
+
+  state.position = savedPosition
+  state.settings = savedSettings
+
+  await render() // First render uses restored state
+}
+```
+
+### Save on exit
+
+```typescript
+bridge.onEvenHubEvent((event) => {
+  const type = event.sysEvent?.eventType ?? event.textEvent?.eventType
+  // Save before exit — user expects to resume here
+  if (type === 5 || type === 6 || type === 7) { // BACKGROUND, ABNORMAL, SYSTEM EXIT
+    saveState(bridge, 'position', state.position)
+  }
+})
+```
+
+## IndexedDB — For large data (>5MB)
+
+SDK localStorage is limited. For large content (books, cached API responses, media), use browser IndexedDB:
+
+```typescript
+function openDB(name: string, storeName: string): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(name, 1)
+    req.onupgradeneeded = () => req.result.createObjectStore(storeName, { keyPath: 'id' })
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+async function saveBlob(db: IDBDatabase, store: string, id: string, data: any): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite')
+    tx.objectStore(store).put({ id, ...data })
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+async function loadBlob(db: IDBDatabase, store: string, id: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly')
+    const req = tx.objectStore(store).get(id)
+    req.onsuccess = () => resolve(req.result ?? null)
+    req.onerror = () => reject(req.error)
+  })
+}
+```
+
+### Storage strategy summary
+
+| Data size | Storage | API |
+|-----------|---------|-----|
+| Small (settings, position, metadata) | SDK localStorage | `bridge.setLocalStorage()` / `bridge.getLocalStorage()` |
+| Large (files, cached content, images) | Browser IndexedDB | `indexedDB.open()` |
+| Temporary (session state) | JS variables | Module-level `let` |
+
+### Rules
+
+1. **ALWAYS restore state on startup** — before the first `createStartUpPageContainer` call.
+2. **ALWAYS save state on exit events** (BACKGROUND, ABNORMAL_EXIT, SYSTEM_EXIT).
+3. **Namespace all keys** with app prefix to avoid collision.
+4. **Wrap loads in try/catch** — storage can be empty or corrupted.
+5. **Save incrementally**, not just on exit — exit events aren't guaranteed to fire.
 
 ---
 
@@ -1155,6 +1273,11 @@ async function init() {
     ),
   ])
 
+  // RESTORE PERSISTED STATE — always do this before first render
+  // Example: restore last position, settings, etc.
+  // const savedPage = await bridge.getLocalStorage('myapp.page')
+  // if (savedPage) state.page = parseInt(savedPage)
+
   bridge.onLaunchSource((source) => {
     console.log('Launched from:', source)
   })
@@ -1202,9 +1325,11 @@ function handleEvent(event: EvenHubEvent) {
       break
     case C.EVT_BACKGROUND:
       handlePause()
+      persistState() // SAVE STATE when going to background
       break
     case C.EVT_ABNORMAL_EXIT:
     case C.EVT_SYSTEM_EXIT:
+      persistState() // SAVE STATE before exit
       cleanup()
       break
   }
@@ -1243,6 +1368,14 @@ async function showMainPage() {
       }),
     ],
   })
+}
+
+// === PERSIST STATE — save user progress to SDK localStorage ===
+async function persistState() {
+  if (!bridge) return
+  // Example: save current position so user resumes here
+  // await bridge.setLocalStorage('myapp.page', String(state.currentPage))
+  // await bridge.setLocalStorage('myapp.settings', JSON.stringify(state.settings))
 }
 
 // === APP-SPECIFIC HANDLERS (customize these) ===
