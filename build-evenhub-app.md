@@ -917,37 +917,66 @@ async function loadBlob(db: IDBDatabase, store: string, id: string): Promise<any
 
 ## Problem
 
-The phone OS can suspend the WebView when the app is in the background or the screen is locked. This kills timers, WebSocket connections, and event listeners.
+The phone OS can suspend the WebView when the app is in the background or the screen is locked. This kills `setInterval`, `setTimeout`, WebSocket connections, and any running JS code. Your timer stops, your clock freezes, your polling stops.
 
-## IMU Keep-Alive Workaround
+**The fix that works**: drive your app's clock from IMU events instead of JS timers. See the validated pattern below.
 
-Enable IMU at low frequency to keep the WebView active:
+## IMU Keep-Alive (VALIDATED PATTERN)
+
+**Status**: Empirically validated. Apps that rely on continuous execution while backgrounded (timers, counters, live data feeds) should use this.
+
+**Pattern**: Enable IMU at 1Hz and use IMU events as the app's tick source. The event stream keeps the WebView from being suspended AND drives your app's internal clock.
 
 ```typescript
-// Start IMU as keep-alive (lowest useful frequency)
-async function enableKeepAlive() {
-  try {
-    await bridge.imuControl(true, ImuReportPace.P1000) // 1Hz
-  } catch {
-    // IMU not available — fall back to polling
-  }
-}
+import { ImuReportPace } from '@evenrealities/even_hub_sdk'
 
-// Stop when not needed (save battery)
-async function disableKeepAlive() {
-  try {
-    await bridge.imuControl(false)
-  } catch {}
-}
+const EVT_IMU_DATA = 8
 
-// In event handler, use IMU events as heartbeat:
+// Enable on startup, disable on exit
+await bridge.imuControl(true, ImuReportPace.P1000) // 1Hz = one event per second
+
 bridge.onEvenHubEvent((event) => {
-  if (event.sysEvent?.eventType === 8) {
-    lastHeartbeat = Date.now()
-    // IMU data available at event.sysEvent.imuData.{x,y,z}
+  const raw =
+    event.listEvent?.eventType ??
+    event.textEvent?.eventType ??
+    event.sysEvent?.eventType
+  const type = raw ?? 0
+
+  // IMU event drives the tick
+  if (type === EVT_IMU_DATA) {
+    onTick()
+    return
   }
+  // ... other event handlers
 })
+
+// Use wall-clock delta, NOT event count — IMU frequency can drift
+let lastTickTime = Date.now()
+
+function onTick() {
+  const now = Date.now()
+  const elapsed = (now - lastTickTime) / 1000
+  if (elapsed < 1) return
+  lastTickTime = now
+
+  // Advance your app's state by `elapsed` seconds
+  // (e.g., countdown timer, animation frame, poll interval)
+}
+
+// Disable IMU before exit to save battery
+bridge.shutDownPageContainer(1)
+bridge.imuControl(false).catch(() => {})
 ```
+
+**Why it works**: IMU events are pushed from firmware → phone → WebView via the message bridge. Each arriving event is JS runtime activity, which defers the OS's suspension timer in many WebView implementations.
+
+**Why wall-clock delta**: Even at 1Hz config, IMU events don't arrive exactly every 1000ms. Use `Date.now()` differences so the timer stays accurate regardless of event jitter.
+
+**Reference implementation**: See `timer-with-imu` — validated 5-minute test with screen locked.
+
+**When NOT to use**: Event-driven apps (chess, reader, menus) that only update on user input don't need this — they're fine being suspended between interactions.
+
+**Battery cost**: ~1Hz IMU + BT traffic. Disable immediately when the app is done needing keep-alive.
 
 ## Foreground/Background Lifecycle
 
