@@ -288,7 +288,13 @@ Rules:
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  server: { host: true, port: 5173 },
+  server: {
+    host: true,
+    port: 5173,
+    // Add proxy entries here if your app calls external APIs that lack CORS headers.
+    // See "Network Calls & CORS" section for details.
+    // proxy: { '/api': { target: 'https://api.example.com', changeOrigin: true, rewrite: p => p.replace(/^\/api/, '') } },
+  },
   build: { target: 'es2020', outDir: 'dist' },
 })
 ```
@@ -732,12 +738,64 @@ async function updateDisplay(content: string) {
 - Never call `updateImageRawData` concurrently — serialize with the render queue.
 - Match image dimensions exactly to container dimensions.
 
-## Network Calls
+## Network Calls & CORS
 
-- Use Vite proxy for CORS-restricted APIs during dev.
-- Cache API responses where appropriate.
-- Never block the render loop waiting for network.
-- Handle network errors gracefully — show "No connection" on glasses, don't crash.
+The Even App WebView is a real browser engine (Chromium on Android, WKWebView on iOS). **Full CORS enforcement applies.** The `app.json` network whitelist is an Even-level permission layer — it does NOT bypass CORS. You need BOTH: domain whitelisted in app.json AND the remote server returning proper `Access-Control-Allow-Origin` headers.
+
+### During Dev (QR sideload from localhost)
+
+Origin = `http://YOUR_LAN_IP:5173`. External APIs that don't return `Access-Control-Allow-Origin: *` will be blocked. Use a Vite proxy:
+
+```typescript
+// vite.config.ts
+import { defineConfig } from 'vite'
+
+export default defineConfig({
+  server: {
+    host: true,
+    port: 5173,
+    proxy: {
+      // Proxy /api/* requests to the real API server-side (no CORS)
+      '/api': {
+        target: 'https://api.example.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+    },
+  },
+  build: { target: 'es2020', outDir: 'dist' },
+})
+```
+
+Then in your app, call `/api/endpoint` instead of `https://api.example.com/endpoint`. Vite fetches it server-side — no CORS headers needed.
+
+**IMPORTANT:** This proxy only works in dev. For production, you need one of:
+
+### In Production (.ehpk in Even App WebView)
+
+| API returns `Access-Control-Allow-Origin: *`? | What to do |
+|-----------------------------------------------|------------|
+| Yes (e.g. Gutenberg, Open Library, public APIs) | Just `fetch()` directly. It works. |
+| No (most private APIs, some REST endpoints) | You need a CORS proxy — use Cloudflare Worker, your own backend, or a proxy service |
+| You control the API | Add `Access-Control-Allow-Origin: *` to your server responses |
+
+### CORS proxy pattern (Cloudflare Worker — free tier)
+
+```typescript
+// For APIs that don't support CORS, route through a lightweight proxy
+const PROXY_URL = 'https://your-worker.your-subdomain.workers.dev'
+
+async function fetchViaProxy(apiUrl: string) {
+  const resp = await fetch(`${PROXY_URL}?url=${encodeURIComponent(apiUrl)}`)
+  return resp.json()
+}
+```
+
+### Rules
+- **Cache API responses** where appropriate — don't re-fetch on every page turn.
+- **Never block the render loop** waiting for network. Fire the fetch, render a loading state, update when data arrives.
+- **Handle network errors** — show "No connection" on glasses, don't crash.
+- **Declare all domains** in `app.json` `permissions.network` — QA will grep your source for undeclared fetch targets.
 
 ---
 
