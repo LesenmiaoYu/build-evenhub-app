@@ -441,8 +441,9 @@ bridge.textContainerUpgrade(new TextContainerUpgrade({
   content: string,
 }))
 
-// Exit
-bridge.shutDownPageContainer(exitMode?: ShutDownExitMode)
+// Exit the app / close canvas on glasses
+bridge.shutDownPageContainer(0)  // 0 = immediate exit, no confirmation
+bridge.shutDownPageContainer(1)  // 1 = system-level popup confirmation (RECOMMENDED for double-tap)
 ```
 
 ## Event System
@@ -584,45 +585,32 @@ Bad: emoji, weather symbols (☀☁), dingbats
 
 ### Exit Mechanism — MANDATORY
 
-Every app MUST implement a way to exit via glasses/ring interaction. Two approved patterns:
+Every app MUST implement a way to exit via glasses/ring interaction. **Use the system-level exit confirmation** — do NOT build your own.
 
-**Pattern A (Recommended) — Double-tap exit confirmation:**
+**Pattern A (Recommended) — Double-tap calls system popup:**
 ```typescript
-let showingExitDialog = false
+function handleEvent(event: EvenHubEvent) {
+  const e = normalizeEvent(event)
 
-function handleEvent(type: number) {
-  if (type === 3) { // DOUBLE_CLICK
-    if (showingExitDialog) {
-      // Confirmed — exit
-      bridge.shutDownPageContainer(0)
-    } else {
-      showingExitDialog = true
-      showExitConfirmation()
-      // Auto-dismiss after 3 seconds
-      setTimeout(() => {
-        if (showingExitDialog) {
-          showingExitDialog = false
-          restoreCurrentPage()
-        }
-      }, 3000)
-    }
-  } else if (showingExitDialog) {
-    // Any other input cancels exit dialog
-    showingExitDialog = false
-    restoreCurrentPage()
+  if (e.type === C.EVT_DOUBLE_CLICK) {
+    persistState()      // save progress FIRST
+    cleanup()           // release intervals/timers
+    bridge.shutDownPageContainer(1)  // 1 = system confirmation popup
+    return
   }
-}
-
-function showExitConfirmation() {
-  bridge.textContainerUpgrade(new TextContainerUpgrade({
-    containerID: mainTextID,
-    containerName: 'main',
-    contentOffset: 0,
-    contentLength: 2000,
-    content: '  Exit app?\n\n  > Double-tap to confirm\n  > Any other input to cancel',
-  }))
+  // ... rest of event handling
 }
 ```
+
+**How `shutDownPageContainer(1)` works:**
+- Calling with `1` triggers the Even App's built-in "Exit?" confirmation dialog on the glasses
+- User can confirm or cancel via ring/temple input
+- You don't need to draw your own dialog, manage timers, or track dialog state
+- This is the canonical pattern — matches Even's native apps
+
+**Exit mode values:**
+- `shutDownPageContainer(0)` — immediate exit, no confirmation (use sparingly)
+- `shutDownPageContainer(1)` — system popup confirmation (standard double-tap behavior)
 
 **Pattern B — Menu with Exit option:**
 ```typescript
@@ -1322,8 +1310,6 @@ import { normalizeEvent, throttleScroll } from './events'
 import * as C from './constants'
 
 let bridge: EvenAppBridge | null = null
-let showingExitDialog = false
-let exitTimeout: number | null = null
 
 // === CLEANUP REGISTRY ===
 const cleanupFns: Array<() => void> = []
@@ -1363,15 +1349,11 @@ async function init() {
 function handleEvent(event: EvenHubEvent) {
   const e = normalizeEvent(event)
 
-  // Exit dialog takes priority
-  if (showingExitDialog) {
-    if (e.type === C.EVT_DOUBLE_CLICK) {
-      bridge!.shutDownPageContainer(0)
-      cleanup()
-      return
-    }
-    // Any other input cancels exit
-    dismissExitDialog()
+  // Double-tap = system exit confirmation (no custom dialog needed)
+  if (e.type === C.EVT_DOUBLE_CLICK) {
+    persistState()
+    cleanup()
+    bridge!.shutDownPageContainer(1) // 1 = system popup
     return
   }
 
@@ -1384,9 +1366,6 @@ function handleEvent(event: EvenHubEvent) {
       break
     case C.EVT_SCROLL_DOWN:
       throttleScroll(() => handleScrollDown())
-      break
-    case C.EVT_DOUBLE_CLICK:
-      showExitDialog()
       break
     case C.EVT_FOREGROUND:
       handleResume()
@@ -1401,23 +1380,6 @@ function handleEvent(event: EvenHubEvent) {
       cleanup()
       break
   }
-}
-
-// === EXIT DIALOG ===
-function showExitDialog() {
-  showingExitDialog = true
-  updateText(bridge!, 1, 'main',
-    '\n  Exit app?\n\n  Double-tap to confirm\n  Any other input to cancel'
-  )
-  exitTimeout = window.setTimeout(() => {
-    if (showingExitDialog) dismissExitDialog()
-  }, C.EXIT_CONFIRM_MS)
-}
-
-function dismissExitDialog() {
-  showingExitDialog = false
-  if (exitTimeout) { clearTimeout(exitTimeout); exitTimeout = null }
-  showMainPage()
 }
 
 // === PAGES ===
@@ -1568,7 +1530,7 @@ npx evenhub login
 2. **Never use #3CFA44 (OS Green) in app UI**. It's for glasses display only.
 3. **createStartUpPageContainer once**. Then rebuildPageContainer forever.
 4. **One isEventCapture per page**. Always.
-5. **Double-tap = exit**. Always implement this. QA will reject without it.
+5. **Double-tap = `shutDownPageContainer(1)`**. Use the system popup, don't build custom dialogs. QA will reject without an exit path.
 6. **Works from glasses Menu**. Even with phone locked. Always.
 7. **Sequential image updates**. Never concurrent.
 8. **SDK quirk**: CLICK_EVENT (0) may arrive as `undefined`. Handle both.
