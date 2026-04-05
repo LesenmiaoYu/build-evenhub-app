@@ -238,24 +238,34 @@ Always create this exact structure:
   "edition": "202601",
   "name": "<Display Name>",
   "version": "1.0.0",
-  "min_app_version": "0.1.0",
+  "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.9",
   "tagline": "<One-liner, under 80 chars>",
   "description": "<Store description>",
   "author": "<developer-name>",
   "entrypoint": "index.html",
-  "permissions": {
-    "network": "",
-    "filesystem": "./assets"
-  },
-  "lang": ["en"]
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Describe why this app needs network access (max 300 chars)",
+      "whitelist": [
+        "https://api.example.com"
+      ]
+    }
+  ],
+  "supported_languages": ["en"]
 }
 ```
 
+**Permission names**: `network`, `g2-microphone`, `phone-microphone`, `album`, `location`, `camera`
+**Supported languages**: `en`, `de`, `fr`, `es`, `it`, `zh`, `ja`, `ko`
+
 Rules:
 - `package_id`: lowercase reverse-domain. Must be unique on Even Hub.
-- `permissions.network`: list ONLY domains the app actually calls. Empty string = unrestricted. Be specific — QA audits this.
-- Every permission requested MUST be justified by actual usage in the code.
+- `permissions`: array of objects. Each needs `name`, `desc`, and `whitelist` (for network). Include ONLY permissions the app actually uses.
+- `desc`: explain WHY the permission is needed (max 300 chars). QA reads this.
+- `whitelist`: list exact domains. QA will grep your source for undeclared fetch targets.
+- If the app makes NO network calls, omit the network permission entirely.
 
 ### package.json
 
