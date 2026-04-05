@@ -1192,10 +1192,19 @@ export async function renderPage(
 ) {
   await enqueueRender(async () => {
     if (!startupRendered) {
-      const result = await bridge.createStartUpPageContainer(
-        new CreateStartUpPageContainer(config)
-      )
-      if (result === 0) startupRendered = true
+      // CRITICAL: Mark startup BEFORE the call, not after based on return value.
+      // SDK return type varies (string vs enum) and checking result === 0
+      // breaks silently — causing createStartUpPageContainer to be called
+      // repeatedly, which floods the bridge and crashes the glasses.
+      startupRendered = true
+      try {
+        await bridge.createStartUpPageContainer(
+          new CreateStartUpPageContainer(config)
+        )
+      } catch (err) {
+        startupRendered = false // allow retry on failure
+        throw err
+      }
     } else {
       await bridge.rebuildPageContainer(new RebuildPageContainer(config))
     }
